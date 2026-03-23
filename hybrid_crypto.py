@@ -44,8 +44,183 @@ class HybridCrypto:
 
     def __init__(self):
         self._private_key = None
+        self._public_key = None
+        self._rsa_key_size = 2048
 
-    # ==================== 1. 判断文件是否加密 ====================
+    # ==================== 1. 生成密钥对 ====================
+
+    def generate_key_pair(self):
+        """
+        生成 RSA-2048 密钥对
+
+        Returns:
+            (private_key, public_key): 元组
+        """
+        self._private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=self._rsa_key_size,
+            backend=default_backend()
+        )
+        self._public_key = self._private_key.public_key()
+        return self._private_key, self._public_key
+
+    def save_keys(self, private_key_path: str, public_key_path: str):
+        """
+        保存密钥对为 PEM 格式
+
+        Args:
+            private_key_path: 私钥保存路径
+            public_key_path: 公钥保存路径
+        """
+        if self._private_key is not None and private_key_path is not None:
+            pem_private = self._private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            with open(private_key_path, "wb") as f:
+                f.write(pem_private)
+            print(f"私钥已保存: {private_key_path}")
+
+        if self._public_key is not None and public_key_path is not None:
+            pem_public = self._public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            with open(public_key_path, "wb") as f:
+                f.write(pem_public)
+            print(f"公钥已保存: {public_key_path}")
+
+    def load_keys(self, private_key_path: str = None, public_key_path: str = None):
+        """
+        加载密钥对 (PEM 格式)
+
+        Args:
+            private_key_path: 私钥文件路径
+            public_key_path: 公钥文件路径
+
+        Returns:
+            是否成功加载
+        """
+        success = True
+
+        if private_key_path is not None and os.path.exists(private_key_path):
+            try:
+                with open(private_key_path, "rb") as f:
+                    pem_data = f.read()
+                self._private_key = serialization.load_pem_private_key(
+                    pem_data, password=None, backend=default_backend()
+                )
+                print(f"私钥已加载: {private_key_path}")
+            except Exception as e:
+                print(f"加载私钥失败: {e}")
+                success = False
+
+        if public_key_path is not None and os.path.exists(public_key_path):
+            try:
+                with open(public_key_path, "rb") as f:
+                    pem_data = f.read()
+                self._public_key = serialization.load_pem_public_key(
+                    pem_data, backend=default_backend()
+                )
+                print(f"公钥已加载: {public_key_path}")
+            except Exception as e:
+                print(f"加载公钥失败: {e}")
+                success = False
+
+        return success
+
+    # ==================== 2. 文件加密 ====================
+
+    def encrypt_file(self, file_path: str):
+        """
+        加密文件（覆盖原文件）
+
+        Args:
+            file_path: 文件路径（加密后覆盖原文件）
+
+        Returns:
+            是否成功
+        """
+        if self._public_key is None:
+            print("错误: 公钥未设置，无法加密")
+            return False
+
+        try:
+            # 读取原始文件内容
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            # 加密数据
+            encrypted_data = self.encrypt_bytes(file_data)
+
+            # 写入临时文件
+            temp_file = file_path + ".tmp"
+            with open(temp_file, "wb") as f:
+                f.write(encrypted_data)
+
+            # 删除原文件，重命名临时文件
+            os.remove(file_path)
+            os.rename(temp_file, file_path)
+
+            print(f"加密成功: {file_path}")
+            return True
+
+        except Exception as e:
+            print(f"加密失败: {e}")
+            return False
+
+    def encrypt_bytes(self, data: bytes) -> Optional[bytes]:
+        """
+        加密字节数组
+
+        Args:
+            data: 要加密的数据
+
+        Returns:
+            加密后的数据，失败返回 None
+        """
+        if self._public_key is None:
+            print("错误: 公钥未设置，无法加密")
+            return None
+
+        try:
+            import secrets
+
+            # 生成随机的 AES 密钥 (128-bit)
+            aes_key = secrets.token_bytes(self.AES_KEY_SIZE)
+
+            # 使用 RSA 公钥加密 AES 密钥
+            encrypted_aes_key = self._public_key.encrypt(
+                aes_key,
+                padding.PKCS1v15()
+            )
+
+            # 生成随机 IV (12 bytes)
+            iv = secrets.token_bytes(self.IV_SIZE)
+
+            # 使用 AES-GCM 加密数据
+            aesgcm = AESGCM(aes_key)
+            cipher_text = aesgcm.encrypt(iv, data, None)
+
+            # 构建输出 (大端序)
+            # [MAGIC(7)] [VERSION(4)] [encKeyLen(4)] [encKey(N)] [IV(12)] [dataLen(4)] [data(M)]
+            result = bytearray()
+            result.extend(self.MAGIC_HEADER)
+            result.extend(struct.pack(">I", self.VERSION))
+            result.extend(struct.pack(">I", len(encrypted_aes_key)))
+            result.extend(encrypted_aes_key)
+            result.extend(iv)
+            result.extend(struct.pack(">I", len(cipher_text)))
+            result.extend(cipher_text)
+
+            return bytes(result)
+
+        except Exception as e:
+            print(f"加密失败: {e}")
+            return None
+
+    # ==================== 3. 判断文件是否加密 ====================
 
     @staticmethod
     def is_encrypt_file(file_path: str) -> bool:
