@@ -46,3 +46,7 @@ hybrid_crypto.cpp:297:67: error: reinterpret_cast from type ‘const int*’ to 
 读取公钥失败
 140195783974400:error:0909006C:PEM routines:get_name:no start line:../crypto/pem/pem_lib.c:745:Expecting: RSA PUBLIC KEY
 加载公钥失败
+
+pyinstaller --add-data "public.pem;." --add-data "private.pem;." --hidden-import "tkinter,cryptography,typing"  -F -w hybrid_crypto_gui.py 
+
+执行exe时 加载默认公钥私钥失败 重新选择还是失败 

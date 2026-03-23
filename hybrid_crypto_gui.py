@@ -10,10 +10,31 @@ c) 使用私钥解密文件或文本
 """
 
 import os
+import sys
 import base64
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from hybrid_crypto import HybridCrypto
+
+
+def get_resource_path(relative_path):
+    """获取资源文件的绝对路径 (支持 PyInstaller 打包)
+    
+    优先从 exe 同目录加载，其次从打包资源加载
+    """
+    # 优先检查 exe 同目录
+    if hasattr(sys, '_MEIPASS'):
+        # 打包后：先检查 exe 同目录
+        exe_dir = os.path.dirname(sys.executable)
+        alt_path = os.path.join(exe_dir, relative_path)
+        if os.path.exists(alt_path):
+            return alt_path
+        # 其次使用打包资源
+        return os.path.join(sys._MEIPASS, relative_path)
+    else:
+        # 正常运行时使用脚本所在目录
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_path, relative_path)
 
 
 class HybridCryptoTool:
@@ -33,8 +54,9 @@ class HybridCryptoTool:
         self.root.configure(bg=self.bg_color)
         
         self.crypto = HybridCrypto()
-        self.default_private_key = "private.pem"
-        self.default_public_key = "public.pem"
+        # 支持 PyInstaller 打包后的路径
+        self.default_private_key = get_resource_path("private.pem")
+        self.default_public_key = get_resource_path("public.pem")
         
         self._init_ui()
         self._load_default_keys()
