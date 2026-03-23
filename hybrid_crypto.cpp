@@ -40,19 +40,306 @@ public:
     static constexpr int AES_KEY_SIZE = 16;  // 128-bit
     static constexpr int GCM_TAG_LENGTH = 16; // 128-bit
     static constexpr int IV_SIZE = 12;        // 96-bit
+    static constexpr int RSA_KEY_SIZE = 2048;
 
-    HybridCrypto() : rsaPrivateKey_(nullptr) {
+    HybridCrypto() : rsaPrivateKey_(nullptr), rsaPublicKey_(nullptr) {
         OpenSSL_add_all_algorithms();
         ERR_load_crypto_strings();
     }
 
     ~HybridCrypto() {
         if (rsaPrivateKey_) RSA_free(rsaPrivateKey_);
+        if (rsaPublicKey_) RSA_free(rsaPublicKey_);
         EVP_cleanup();
         ERR_free_strings();
     }
 
-    // ==================== 1. 判断文件是否加密 ====================
+    // ==================== 1. 生成密钥对 ====================
+
+    /**
+     * 生成 RSA-2048 密钥对
+     * @return 是否成功
+     */
+    bool generateKeyPair() {
+        // 创建 RSA 密钥gen
+        RSA* rsa = RSA_new();
+        if (!rsa) {
+            std::cerr << "创建 RSA 失败" << std::endl;
+            return false;
+        }
+
+        // 生成密钥对
+        BIGNUM* e = BN_new();
+        BN_set_word(e, 65537);  // 常用的公钥指数
+
+        if (RSA_generate_key_ex(rsa, RSA_KEY_SIZE, e, nullptr) != 1) {
+            std::cerr << "生成 RSA 密钥对失败" << std::endl;
+            ERR_print_errors_fp(stderr);
+            BN_free(e);
+            RSA_free(rsa);
+            return false;
+        }
+
+        BN_free(e);
+
+        // 保存密钥
+        if (rsaPrivateKey_) RSA_free(rsaPrivateKey_);
+        if (rsaPublicKey_) RSA_free(rsaPublicKey_);
+
+        rsaPrivateKey_ = rsa;
+        rsaPublicKey_ = RSAPublicKey_dup(rsa);  // 从私钥提取公钥
+
+        std::cout << "密钥对生成成功" << std::endl;
+        return true;
+    }
+
+    /**
+     * 保存密钥对为 PEM 格式
+     * @param privateKeyPath 私钥保存路径
+     * @param publicKeyPath 公钥保存路径
+     * @return 是否成功
+     */
+    bool saveKeys(const std::string& privateKeyPath, const std::string& publicKeyPath) {
+        bool success = true;
+
+        // 保存私钥
+        if (rsaPrivateKey_) {
+            FILE* fp = fopen(privateKeyPath.c_str(), "w");
+            if (!fp) {
+                std::cerr << "无法创建私钥文件: " << privateKeyPath << std::endl;
+                success = false;
+            } else {
+                if (PEM_write_RSAPrivateKey(fp, rsaPrivateKey_, nullptr, nullptr, 0, nullptr, nullptr) != 1) {
+                    std::cerr << "写入私钥失败" << std::endl;
+                    success = false;
+                } else {
+                    std::cout << "私钥已保存: " << privateKeyPath << std::endl;
+                }
+                fclose(fp);
+            }
+        }
+
+        // 保存公钥
+        if (rsaPublicKey_) {
+            FILE* fp = fopen(publicKeyPath.c_str(), "w");
+            if (!fp) {
+                std::cerr << "无法创建公钥文件: " << publicKeyPath << std::endl;
+                success = false;
+            } else {
+                if (PEM_write_RSAPublicKey(fp, rsaPublicKey_) != 1) {
+                    std::cerr << "写入公钥失败" << std::endl;
+                    success = false;
+                } else {
+                    std::cout << "公钥已保存: " << publicKeyPath << std::endl;
+                }
+                fclose(fp);
+            }
+        }
+
+        return success;
+    }
+
+    /**
+     * 加载密钥对 (PEM 格式)
+     * @param privateKeyPath 私钥文件路径
+     * @param publicKeyPath 公钥文件路径
+     * @return 是否成功加载
+     */
+    bool loadKeys(const std::string& privateKeyPath = "", const std::string& publicKeyPath = "") {
+        bool success = true;
+
+        // 加载私钥
+        if (!privateKeyPath.empty()) {
+            FILE* fp = fopen(privateKeyPath.c_str(), "r");
+            if (!fp) {
+                std::cerr << "无法打开私钥文件: " << privateKeyPath << std::endl;
+                success = false;
+            } else {
+                if (rsaPrivateKey_) RSA_free(rsaPrivateKey_);
+                rsaPrivateKey_ = PEM_read_RSAPrivateKey(fp, nullptr, nullptr, nullptr);
+                fclose(fp);
+                if (!rsaPrivateKey_) {
+                    std::cerr << "读取私钥失败" << std::endl;
+                    ERR_print_errors_fp(stderr);
+                    success = false;
+                } else {
+                    std::cout << "私钥已加载: " << privateKeyPath << std::endl;
+                }
+            }
+        }
+
+        // 加载公钥
+        if (!publicKeyPath.empty()) {
+            FILE* fp = fopen(publicKeyPath.c_str(), "r");
+            if (!fp) {
+                std::cerr << "无法打开公钥文件: " << publicKeyPath << std::endl;
+                success = false;
+            } else {
+                if (rsaPublicKey_) RSA_free(rsaPublicKey_);
+                rsaPublicKey_ = PEM_read_RSAPublicKey(fp, nullptr, nullptr, nullptr);
+                fclose(fp);
+                if (!rsaPublicKey_) {
+                    std::cerr << "读取公钥失败" << std::endl;
+                    ERR_print_errors_fp(stderr);
+                    success = false;
+                } else {
+                    std::cout << "公钥已加载: " << publicKeyPath << std::endl;
+                }
+            }
+        }
+
+        return success;
+    }
+
+    // ==================== 2. 文件加密 ====================
+
+    /**
+     * 加密文件（覆盖原文件）
+     * @param filePath 文件路径（加密后覆盖原文件）
+     * @return 是否成功
+     */
+    bool encryptFile(const std::string& filePath) {
+        if (!rsaPublicKey_) {
+            std::cerr << "公钥未设置，无法加密" << std::endl;
+            return false;
+        }
+
+        // 读取原始文件内容
+        std::ifstream inFile(filePath, std::ios::binary);
+        if (!inFile) {
+            std::cerr << "无法打开文件: " << filePath << std::endl;
+            return false;
+        }
+
+        inFile.seekg(0, std::ios::end);
+        size_t fileSize = inFile.tellg();
+        inFile.seekg(0, std::ios::beg);
+
+        std::vector<uint8_t> fileData(fileSize);
+        inFile.read(reinterpret_cast<char*>(fileData.data()), fileSize);
+        inFile.close();
+
+        // 加密数据
+        std::vector<uint8_t> encryptedData;
+        if (!encryptBytes(fileData, encryptedData)) {
+            return false;
+        }
+
+        // 写入临时文件
+        std::string tempFile = filePath + ".tmp";
+        std::ofstream outFile(tempFile, std::ios::binary);
+        if (!outFile) {
+            std::cerr << "无法创建临时文件: " << tempFile << std::endl;
+            return false;
+        }
+        outFile.write(reinterpret_cast<const char*>(encryptedData.data()), encryptedData.size());
+        outFile.close();
+
+        // 删除原文件，重命名临时文件
+        remove(filePath.c_str());
+        rename(tempFile.c_str(), filePath.c_str());
+
+        std::cout << "加密成功: " << filePath << std::endl;
+        return true;
+    }
+
+    /**
+     * 加密字节数组
+     * @param data 要加密的数据
+     * @param encryptedData 输出加密后的数据
+     * @return 是否成功
+     */
+    bool encryptBytes(const std::vector<uint8_t>& data, std::vector<uint8_t>& encryptedData) {
+        if (!rsaPublicKey_) {
+            std::cerr << "公钥未设置，无法加密" << std::endl;
+            return false;
+        }
+
+        try {
+            // 生成随机的 AES 密钥 (128-bit)
+            std::vector<uint8_t> aesKey(AES_KEY_SIZE);
+            if (RAND_bytes(aesKey.data(), AES_KEY_SIZE) != 1) {
+                std::cerr << "生成 AES 密钥失败" << std::endl;
+                return false;
+            }
+
+            // 使用 RSA 公钥加密 AES 密钥
+            std::vector<uint8_t> encryptedAesKey(RSA_size(rsaPublicKey_));
+            int encryptedAesKeyLen = RSA_public_encrypt(AES_KEY_SIZE, aesKey.data(),
+                                                        encryptedAesKey.data(), rsaPublicKey_,
+                                                        RSA_PKCS1_PADDING);
+            if (encryptedAesKeyLen < 0) {
+                std::cerr << "RSA 加密 AES 密钥失败" << std::endl;
+                ERR_print_errors_fp(stderr);
+                return false;
+            }
+            encryptedAesKey.resize(encryptedAesKeyLen);
+
+            // 生成随机 IV (12 bytes)
+            std::vector<uint8_t> iv(IV_SIZE);
+            if (RAND_bytes(iv.data(), IV_SIZE) != 1) {
+                std::cerr << "生成 IV 失败" << std::endl;
+                return false;
+            }
+
+            // 使用 AES-GCM 加密数据
+            std::vector<uint8_t> cipherText;
+            if (!aesGcmEncrypt(aesKey.data(), aesKey.size(), iv.data(),
+                              data.data(), data.size(), cipherText)) {
+                return false;
+            }
+
+            // 构建输出 (大端序)
+            // [MAGIC(7)] [VERSION(4)] [encKeyLen(4)] [encKey(N)] [IV(12)] [dataLen(4)] [data(M)]
+            encryptedData.clear();
+            encryptedData.insert(encryptedData.end(), MAGIC_HEADER, MAGIC_HEADER + MAGIC_SIZE);
+            encryptedData.insert(encryptedData.end(), 
+                               reinterpret_cast<uint8_t*>(&VERSION)[3],
+                               reinterpret_cast<uint8_t*>(&VERSION)[4]);
+
+            // VERSION (4 bytes, big-endian)
+            uint8_t versionBytes[4];
+            versionBytes[0] = (VERSION >> 24) & 0xFF;
+            versionBytes[1] = (VERSION >> 16) & 0xFF;
+            versionBytes[2] = (VERSION >> 8) & 0xFF;
+            versionBytes[3] = VERSION & 0xFF;
+            encryptedData.insert(encryptedData.end(), versionBytes, versionBytes + 4);
+
+            // encryptedAesKeyLen (4 bytes, big-endian)
+            uint8_t keyLenBytes[4];
+            keyLenBytes[0] = (encryptedAesKeyLen >> 24) & 0xFF;
+            keyLenBytes[1] = (encryptedAesKeyLen >> 16) & 0xFF;
+            keyLenBytes[2] = (encryptedAesKeyLen >> 8) & 0xFF;
+            keyLenBytes[3] = encryptedAesKeyLen & 0xFF;
+            encryptedData.insert(encryptedData.end(), keyLenBytes, keyLenBytes + 4);
+
+            // encryptedAesKey
+            encryptedData.insert(encryptedData.end(), encryptedAesKey.begin(), encryptedAesKey.end());
+
+            // IV
+            encryptedData.insert(encryptedData.end(), iv.begin(), iv.end());
+
+            // cipherText length (4 bytes, big-endian)
+            int cipherLen = cipherText.size();
+            uint8_t dataLenBytes[4];
+            dataLenBytes[0] = (cipherLen >> 24) & 0xFF;
+            dataLenBytes[1] = (cipherLen >> 16) & 0xFF;
+            dataLenBytes[2] = (cipherLen >> 8) & 0xFF;
+            dataLenBytes[3] = cipherLen & 0xFF;
+            encryptedData.insert(encryptedData.end(), dataLenBytes, dataLenBytes + 4);
+
+            // cipherText
+            encryptedData.insert(encryptedData.end(), cipherText.begin(), cipherText.end());
+
+            return true;
+
+        } catch (const std::exception& e) {
+            std::cerr << "加密失败: " << e.what() << std::endl;
+            return false;
+        }
+    }
+
+    // ==================== 3. 判断文件是否加密 ====================
 
     /**
      * 检查文件是否为加密文件
@@ -198,6 +485,7 @@ public:
 
 private:
     RSA* rsaPrivateKey_;
+    RSA* rsaPublicKey_;
 
     /**
      * 从 PEM 文件加载私钥
