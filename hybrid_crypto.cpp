@@ -168,7 +168,7 @@ public:
             }
         }
 
-        // 加载公钥
+        // 加载公钥 (支持 PKCS#8 格式 -----BEGIN PUBLIC KEY-----)
         if (!publicKeyPath.empty()) {
             FILE* fp = fopen(publicKeyPath.c_str(), "r");
             if (!fp) {
@@ -176,14 +176,23 @@ public:
                 success = false;
             } else {
                 if (rsaPublicKey_) RSA_free(rsaPublicKey_);
-                rsaPublicKey_ = PEM_read_RSAPublicKey(fp, nullptr, nullptr, nullptr);
+                // 使用 PEM_read_PUBKEY 支持 PKCS#8 格式公钥
+                EVP_PKEY* pkey = PEM_read_PUBKEY(fp, nullptr, nullptr, nullptr);
                 fclose(fp);
-                if (!rsaPublicKey_) {
+                if (!pkey) {
                     std::cerr << "读取公钥失败" << std::endl;
                     ERR_print_errors_fp(stderr);
                     success = false;
                 } else {
-                    std::cout << "公钥已加载: " << publicKeyPath << std::endl;
+                    // 从 EVP_PKEY 提取 RSA 公钥
+                    rsaPublicKey_ = EVP_PKEY_get1_RSA(pkey);
+                    EVP_PKEY_free(pkey);
+                    if (!rsaPublicKey_) {
+                        std::cerr << "提取 RSA 公钥失败" << std::endl;
+                        success = false;
+                    } else {
+                        std::cout << "公钥已加载: " << publicKeyPath << std::endl;
+                    }
                 }
             }
         }
@@ -293,9 +302,6 @@ public:
             // [MAGIC(7)] [VERSION(4)] [encKeyLen(4)] [encKey(N)] [IV(12)] [dataLen(4)] [data(M)]
             encryptedData.clear();
             encryptedData.insert(encryptedData.end(), MAGIC_HEADER, MAGIC_HEADER + MAGIC_SIZE);
-            encryptedData.insert(encryptedData.end(), 
-                               reinterpret_cast<uint8_t*>(&VERSION)[3],
-                               reinterpret_cast<uint8_t*>(&VERSION)[4]);
 
             // VERSION (4 bytes, big-endian)
             uint8_t versionBytes[4];
@@ -605,6 +611,55 @@ private:
                data[offset + 3];
     }
 
+    // AES-GCM 加密
+    bool aesGcmEncrypt(const uint8_t* key, int keyLen,
+                       const uint8_t* iv,
+                       const uint8_t* plainText, int plainLen,
+                       std::vector<uint8_t>& cipherText) {
+        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) return false;
+
+        // 输出缓冲区 = 密文 + GCM tag
+        cipherText.resize(plainLen + GCM_TAG_LENGTH);
+
+        // 初始化加密
+        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1)
+            goto err;
+
+        // 设置 IV 长度
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_SIZE, nullptr) != 1)
+            goto err;
+
+        // 设置密钥和 IV
+        if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, iv) != 1)
+            goto err;
+
+        // 加密
+        int len;
+        if (EVP_EncryptUpdate(ctx, cipherText.data(), &len, plainText, plainLen) != 1)
+            goto err;
+
+        // 完成加密并获取 tag
+        if (EVP_EncryptFinal_ex(ctx, cipherText.data() + len, &len) != 1)
+            goto err;
+
+        // 获取 GCM tag
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LENGTH,
+                               cipherText.data() + plainLen) != 1)
+            goto err;
+
+        // 调整大小为实际密文 + tag
+        cipherText.resize(plainLen + GCM_TAG_LENGTH);
+
+        EVP_CIPHER_CTX_free(ctx);
+        return true;
+
+    err:
+        EVP_CIPHER_CTX_free(ctx);
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
     // AES-GCM 解密
     bool aesGcmDecrypt(const uint8_t* key, int keyLen,
                       const uint8_t* iv,
@@ -659,50 +714,95 @@ private:
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "用法:" << std::endl;
-        std::cout << "  " << argv[0] << " check <file>                    - 检查是否为加密文件" << std::endl;
-        std::cout << "  " << argv[0] << " decrypt <in> <out> <private.pem> - 解密文件到输出文件" << std::endl;
+        std::cout << "  " << argv[0] << " gen <private.pem> <public.pem>      - 生成 RSA 密钥对" << std::endl;
+        std::cout << "  " << argv[0] << " encrypt <file> <public.pem>       - 使用公钥加密文件" << std::endl;
+        std::cout << "  " << argv[0] << " decrypt <file> <private.pem>      - 使用私钥解密文件" << std::endl;
+        std::cout << "  " << argv[0] << " check <file>                      - 检查是否为加密文件" << std::endl;
         return 1;
     }
 
     std::string command = argv[1];
 
-    if (command == "check" && argc == 3) {
-        std::string filePath = argv[2];
-        if (HybridCrypto::isEncryptFile(filePath)) {
-            std::cout << "✓ 是加密文件" << std::endl;
-        } else {
-            std::cout << "✗ 不是加密文件" << std::endl;
+    // 生成密钥对
+    if (command == "gen" && argc == 4) {
+        std::string privateKeyPath = argv[2];
+        std::string publicKeyPath = argv[3];
+
+        HybridCrypto crypto;
+        if (!crypto.generateKeyPair()) {
+            std::cerr << "生成密钥对失败" << std::endl;
+            return 1;
         }
+
+        if (!crypto.saveKeys(privateKeyPath, publicKeyPath)) {
+            std::cerr << "保存密钥失败" << std::endl;
+            return 1;
+        }
+
+        std::cout << "OK 密钥对生成成功" << std::endl;
         return 0;
     }
 
-    if (command == "decrypt" && argc == 5) {
-        std::string inputPath = argv[2];
-        std::string outputPath = argv[3];
-        std::string keyPath = argv[4];
+    // 加密文件
+    if (command == "encrypt" && argc == 4) {
+        std::string filePath = argv[2];
+        std::string publicKeyPath = argv[3];
+
+        HybridCrypto crypto;
+        if (!crypto.loadKeys("", publicKeyPath)) {
+            std::cerr << "加载公钥失败" << std::endl;
+            return 1;
+        }
+
+        if (!crypto.encryptFile(filePath)) {
+            std::cerr << "加密失败" << std::endl;
+            return 1;
+        }
+
+        std::cout << "OK 加密成功: " << filePath << std::endl;
+        return 0;
+    }
+
+    // 解密文件
+    if (command == "decrypt" && argc == 4) {
+        std::string filePath = argv[2];
+        std::string privateKeyPath = argv[3];
 
         // 首先检查是否为加密文件
-        if (!HybridCrypto::isEncryptFile(inputPath)) {
+        if (!HybridCrypto::isEncryptFile(filePath)) {
             std::cerr << "错误: 不是加密文件" << std::endl;
             return 1;
         }
 
         HybridCrypto crypto;
+        std::string outputPath = filePath + ".dec";
+
         std::ofstream outFile(outputPath, std::ios::binary);
         if (!outFile) {
             std::cerr << "无法创建输出文件: " << outputPath << std::endl;
             return 1;
         }
 
-        if (crypto.readEncryptFile(inputPath, keyPath, outFile)) {
+        if (crypto.readEncryptFile(filePath, privateKeyPath, outFile)) {
             outFile.close();
-            std::cout << "✓ 解密成功: " << outputPath << std::endl;
+            std::cout << "OK 解密成功: " << outputPath << std::endl;
             return 0;
         } else {
             outFile.close();
-            std::cerr << "✗ 解密失败" << std::endl;
+            std::cerr << "FAIL 解密失败" << std::endl;
             return 1;
         }
+    }
+
+    // 检查文件
+    if (command == "check" && argc == 3) {
+        std::string filePath = argv[2];
+        if (HybridCrypto::isEncryptFile(filePath)) {
+            std::cout << "OK 是加密文件" << std::endl;
+        } else {
+            std::cout << "FAIL 不是加密文件" << std::endl;
+        }
+        return 0;
     }
 
     std::cerr << "参数错误" << std::endl;

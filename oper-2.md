@@ -32,3 +32,17 @@ c) 使用私钥对文件进行解密 ,解密内容显示到输入框或者文件
 增加生成公钥私钥的方法 
 增加使用公钥进行加密的方法 
  目前使用私钥进行解密 方法已经进行验证  
+
+ 不要进行编译   ，检查代码 
+ g++ -g  -o hybrid_crypto hybrid_crypto.cpp  -lssl -lcrypto
+hybrid_crypto.cpp: In member function ‘bool HybridCrypto::encryptBytes(const std::vector<unsigned char>&, std::vector<unsigned char>&)’:
+hybrid_crypto.cpp:297:67: error: reinterpret_cast from type ‘const int*’ to type ‘uint8_t*’ {aka ‘unsigned char*’} casts away qualifiers
+                                reinterpret_cast<uint8_t*>(&VERSION)[3],
+                                                                   ^
+
+ 不要进行编译   ，检查代码 hybrid_crypto.cpp
+ linux 执行 
+./hybrid_crypto encrypt enc.md ./public.pem 
+读取公钥失败
+140195783974400:error:0909006C:PEM routines:get_name:no start line:../crypto/pem/pem_lib.c:745:Expecting: RSA PUBLIC KEY
+加载公钥失败
