@@ -1,0 +1,3 @@
+Hello, this is a cross-language encryption test!
+This file was encrypted by Java and can be decrypted by Python/C++.
+测试中文内容: 跨语言加密测试成功!
